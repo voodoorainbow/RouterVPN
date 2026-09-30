@@ -14,6 +14,7 @@ DEFAULT_STATE = {
     "next_check_at": None,
     "routed_interface": None,
     "failover_enabled": True,
+    "check_interval_sec": None,
     "status": "starting",
     "message": "",
     "wireguards": [],

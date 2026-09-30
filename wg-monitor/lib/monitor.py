@@ -151,7 +151,14 @@ class Monitor:
         )
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Seed interval into state on first boot if missing
+        state = self.store.load()
+        if state.get("check_interval_sec") is None:
+            self.store.update(
+                check_interval_sec=int(self.config.get("check_interval_sec", 300))
+            )
 
     @property
     def failover_enabled(self) -> bool:
@@ -163,20 +170,49 @@ class Monitor:
     def set_failover_enabled(self, enabled: bool) -> dict:
         return self.store.update(failover_enabled=bool(enabled))
 
+    @property
+    def check_interval_sec(self) -> int:
+        state = self.store.load()
+        value = state.get("check_interval_sec")
+        if value is None:
+            value = self.config.get("check_interval_sec", 300)
+        try:
+            return max(60, min(86400, int(value)))
+        except (TypeError, ValueError):
+            return 300
+
+    def set_check_interval_sec(self, seconds: int) -> dict:
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError) as exc:
+            raise KeeneticRciError("check_interval_sec must be an integer") from exc
+        seconds = max(60, min(86400, seconds))
+        state = self.store.update(
+            check_interval_sec=seconds,
+            next_check_at=time.time() + seconds,
+        )
+        self.store.add_event(
+            "settings",
+            f"Check interval set to {seconds}s ({seconds / 60:.1f} min)",
+        )
+        self._wake.set()
+        return self.store.load()
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._wake.clear()
         self._thread = threading.Thread(target=self._loop, name="wg-monitor", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread:
             self._thread.join(timeout=5)
 
     def _loop(self) -> None:
-        interval = int(self.config.get("check_interval_sec", 300))
         # First run shortly after start
         while not self._stop.is_set():
             try:
@@ -184,9 +220,22 @@ class Monitor:
             except Exception as exc:
                 log.exception("Monitor cycle failed: %s", exc)
                 self.store.update(status="error", message=str(exc))
-            interval = int(self.config.get("check_interval_sec", 300))
-            self.store.update(next_check_at=time.time() + interval)
-            self._stop.wait(interval)
+            interval = self.check_interval_sec
+            self.store.update(
+                next_check_at=time.time() + interval,
+                check_interval_sec=interval,
+            )
+            self._wake.clear()
+            deadline = time.time() + interval
+            while not self._stop.is_set() and not self._wake.is_set() and time.time() < deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._stop.wait(min(1.0, remaining))
+            if self._wake.is_set() and not self._stop.is_set():
+                self._wake.clear()
+                # Interval changed — apply immediately with a fresh check
+                continue
 
     def collect_snapshot(self) -> dict:
         handshake_max = int(self.config.get("handshake_max_age_sec", 180))
@@ -214,7 +263,7 @@ class Monitor:
     def _run_once_locked(self, force_failover_to: Optional[str] = None) -> dict:
         snap = self.collect_snapshot()
         routed = snap["routed_interface"]
-        interval = int(self.config.get("check_interval_sec", 300))
+        interval = self.check_interval_sec
 
         status = "ok"
         message = "Routed WireGuard is active" if snap["routed_online"] else "Routed WireGuard is inactive"
@@ -225,6 +274,7 @@ class Monitor:
             policy=snap["policy"],
             name_servers=snap["name_servers"],
             route_count=snap["route_count"],
+            check_interval_sec=interval,
             status=status,
             message=message,
             next_check_at=time.time() + interval,

@@ -121,6 +121,26 @@ HTML_PAGE = """<!DOCTYPE html>
     .events { font-size: 0.88rem; color: var(--muted); }
     .events li { margin-bottom: 8px; }
     .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.85rem; }
+    .settings {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .settings label { color: var(--muted); font-size: 0.9rem; }
+    .settings input {
+      width: 88px;
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #152033;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+    }
   </style>
 </head>
 <body>
@@ -136,7 +156,14 @@ HTML_PAGE = """<!DOCTYPE html>
         <button id="btnCheck">Проверить сейчас</button>
         <button id="btnFailover" class="toggle">Автоfailover: …</button>
       </div>
-      <div class="label">WireGuard интерфейсы</div>
+      <div class="settings">
+        <label for="intervalMin">Частота проверки</label>
+        <input id="intervalMin" type="number" min="1" max="1440" step="1" title="Минуты (минимум 1)">
+        <span class="sub" style="margin:0">мин</span>
+        <button id="btnInterval">Сохранить</button>
+        <span class="sub" id="intervalHint" style="margin:0"></span>
+      </div>
+      <div class="label" style="margin-top:16px">WireGuard интерфейсы</div>
       <div style="overflow-x:auto;margin-top:8px">
         <table>
           <thead>
@@ -177,15 +204,23 @@ HTML_PAGE = """<!DOCTYPE html>
     function render(state) {
       const routed = state.routed_interface || "—";
       const online = (state.wireguards || []).find(w => w.id === routed)?.online;
+      const intervalSec = Number(state.check_interval_sec) || 300;
+      const intervalMin = Math.max(1, Math.round(intervalSec / 60));
       const summary = document.getElementById("summary");
       summary.innerHTML = `
         <div class="card"><div class="label">Routed WG</div><div class="value mono">${routed}</div></div>
         <div class="card"><div class="label">Routed status</div><div class="value ${online ? "ok" : "bad"}">${online ? "active" : "inactive"}</div></div>
         <div class="card"><div class="label">Status</div><div class="value">${state.status || "—"}</div></div>
         <div class="card"><div class="label">Routes</div><div class="value">${state.route_count ?? "—"}</div></div>
+        <div class="card"><div class="label">Интервал</div><div class="value">${intervalMin} мин</div></div>
         <div class="card"><div class="label">Last check</div><div class="value" style="font-size:0.95rem">${fmtTs(state.updated_at)}</div></div>
         <div class="card"><div class="label">Next check</div><div class="value" style="font-size:0.95rem">${fmtTs(state.next_check_at)}</div></div>
       `;
+      const intervalInput = document.getElementById("intervalMin");
+      if (document.activeElement !== intervalInput) {
+        intervalInput.value = String(intervalMin);
+      }
+      document.getElementById("intervalHint").textContent = "(" + intervalSec + " сек)";
       const btn = document.getElementById("btnFailover");
       const on = !!state.failover_enabled;
       btn.textContent = "Автоfailover: " + (on ? "ON" : "OFF");
@@ -217,9 +252,6 @@ HTML_PAGE = """<!DOCTYPE html>
       events.innerHTML = list.length
         ? list.map(e => `<li><span class="mono">${fmtTs(e.ts)}</span> · <strong>${e.type}</strong> — ${e.message}</li>`).join("")
         : "<li>Пока нет событий</li>";
-      if (state.message) {
-        /* keep message visible in status card already */
-      }
     }
     async function refresh() {
       const state = await api("/api/state");
@@ -236,6 +268,20 @@ HTML_PAGE = """<!DOCTYPE html>
       try {
         const state = await api("/api/state");
         await api("/api/failover", { method: "POST", body: JSON.stringify({ enabled: !state.failover_enabled }) });
+        await refresh();
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnInterval").onclick = async () => {
+      const minutes = Number(document.getElementById("intervalMin").value);
+      if (!Number.isFinite(minutes) || minutes < 1) {
+        alert("Укажите интервал в минутах (минимум 1)");
+        return;
+      }
+      try {
+        await api("/api/interval", {
+          method: "POST",
+          body: JSON.stringify({ minutes: Math.round(minutes) })
+        });
         await refresh();
       } catch (e) { alert(e.message); }
     };
@@ -288,7 +334,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._html(HTML_PAGE)
             return
         if path == "/api/state":
-            self._json(200, self.monitor.store.load())
+            state = self.monitor.store.load()
+            state["check_interval_sec"] = self.monitor.check_interval_sec
+            state["failover_enabled"] = self.monitor.failover_enabled
+            self._json(200, state)
             return
         self._json(404, {"error": "not found"})
 
@@ -304,6 +353,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 enabled = bool(body.get("enabled"))
                 self.monitor.set_failover_enabled(enabled)
                 self._json(200, self.monitor.store.load())
+                return
+            if path == "/api/interval":
+                body = self._read_json()
+                if "minutes" in body and body.get("minutes") is not None:
+                    minutes = body.get("minutes")
+                    try:
+                        seconds = int(round(float(minutes) * 60))
+                    except (TypeError, ValueError):
+                        self._json(400, {"error": "minutes must be a number"})
+                        return
+                elif "seconds" in body and body.get("seconds") is not None:
+                    try:
+                        seconds = int(body.get("seconds"))
+                    except (TypeError, ValueError):
+                        self._json(400, {"error": "seconds must be an integer"})
+                        return
+                else:
+                    self._json(400, {"error": "minutes or seconds required"})
+                    return
+                if seconds < 60:
+                    self._json(400, {"error": "minimum interval is 1 minute"})
+                    return
+                state = self.monitor.set_check_interval_sec(seconds)
+                self._json(200, state)
                 return
             if path == "/api/switch":
                 body = self._read_json()

@@ -1,0 +1,19 @@
+{
+  "rci_url": "http://192.168.1.1",
+  "username": "admin",
+  "password": "CHANGE_ME",
+  "listen_host": "0.0.0.0",
+  "listen_port": 8088,
+  "check_interval_sec": 300,
+  "handshake_max_age_sec": 180,
+  "failover_enabled": true,
+  "preference": [
+    "Wireguard3",
+    "Wireguard0",
+    "Wireguard2"
+  ],
+  "route_batch_size": 50,
+  "policy_name": "Policy0",
+  "state_path": "/opt/var/lib/wg-monitor/state.json",
+  "backup_dir": "/opt/var/lib/wg-monitor"
+}

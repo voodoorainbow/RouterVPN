@@ -1,0 +1,7 @@
+creds
+**/creds
+**/.DS_Store
+**/__pycache__/
+*.pyc
+wg-monitor/config.json
+*.log

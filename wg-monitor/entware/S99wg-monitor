@@ -1,0 +1,69 @@
+#!/bin/sh
+
+ENABLED=yes
+PROCS=wg-monitor
+ARGS=""
+PREARGS=""
+DESC="WireGuard monitor + failover"
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+WG_MONITOR_BIN=/opt/share/wg-monitor/main.py
+WG_MONITOR_PID=/opt/var/run/wg-monitor.pid
+WG_MONITOR_LOG=/opt/var/log/wg-monitor.log
+
+[ -z "$PYTHON" ] && PYTHON=/opt/bin/python3
+
+start() {
+  if [ -f "$WG_MONITOR_PID" ] && kill -0 "$(cat "$WG_MONITOR_PID")" 2>/dev/null; then
+    echo "$DESC already running"
+    return 0
+  fi
+  mkdir -p /opt/var/run /opt/var/log /opt/var/lib/wg-monitor
+  echo "Starting $DESC..."
+  "$PYTHON" "$WG_MONITOR_BIN" >>"$WG_MONITOR_LOG" 2>&1 &
+  echo $! >"$WG_MONITOR_PID"
+}
+
+stop() {
+  echo "Stopping $DESC..."
+  if [ -f "$WG_MONITOR_PID" ]; then
+    kill "$(cat "$WG_MONITOR_PID")" 2>/dev/null
+    rm -f "$WG_MONITOR_PID"
+  fi
+  killall "$(basename "$WG_MONITOR_BIN")" 2>/dev/null
+  # Also kill python process running main.py
+  pkill -f "/opt/share/wg-monitor/main.py" 2>/dev/null
+  return 0
+}
+
+status() {
+  if [ -f "$WG_MONITOR_PID" ] && kill -0 "$(cat "$WG_MONITOR_PID")" 2>/dev/null; then
+    echo "$DESC is running (pid $(cat "$WG_MONITOR_PID"))"
+    return 0
+  fi
+  echo "$DESC is not running"
+  return 1
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart)
+    stop
+    sleep 1
+    start
+    ;;
+  status|check)
+    status
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+
+exit $?

@@ -1,0 +1,13 @@
+---
+description: Token-efficient Agent behavior for multi-platform development
+alwaysApply: true
+---
+
+# Token efficiency
+
+- Prefer targeted file reads and ripgrep over opening whole trees.
+- Do not dump large logs, lockfiles, build artifacts, or generated code into context.
+- Use Context7 MCP for library/API docs (Python, Android/Kotlin, Swift/iOS, ESP-IDF, Raspberry Pi / Linux) instead of guessing APIs.
+- Use GitHub MCP only when repo/issue/PR operations are needed.
+- Keep answers concise; avoid restating the task.
+- Never commit secrets (`creds`, `.env`, keys, tokens).

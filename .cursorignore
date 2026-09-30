@@ -1,0 +1,38 @@
+# Extra ignore for AI indexing / Agent context (token + noise reduction).
+
+creds
+**/creds
+**/.env
+**/.env.*
+**/config.json
+**/*.pem
+**/*.key
+**/id_rsa*
+
+# Python
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+**/venv/
+**/*.egg-info/
+
+# JS / mobile / native builds
+**/node_modules/
+**/.gradle/
+**/build/
+**/DerivedData/
+**/.build/
+**/Pods/
+**/.cxx/
+**/.dart_tool/
+**/managed_components/
+**/esp-idf/
+
+# Lock & generated noise
+**/package-lock.json
+**/yarn.lock
+**/Podfile.lock
+**/*.min.js
+**/*.map

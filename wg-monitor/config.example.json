@@ -23,6 +23,8 @@
   "hidethis_timeout_sec": 45,
   "auto_provision_enabled": false,
   "auto_provision_cooldown_sec": 3600,
+  "delete_inactive_enabled": false,
+  "delete_inactive_after_days": 7,
   "update_repo": "voodoorainbow/RouterVPN",
   "update_ref": "wg-monitor"
 }

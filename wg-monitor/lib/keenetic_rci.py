@@ -123,6 +123,12 @@ class KeeneticRci:
     def save_configuration(self) -> Any:
         return self.batch([{"system": {"configuration": {"save": {}}}}])
 
+    def delete_interface(self, name: str, *, save: bool = False) -> Any:
+        result = self.batch([{"interface": {name: {"no": True}}}])
+        if save:
+            self.save_configuration()
+        return result
+
     def wireguard_names(self, ifaces: Optional[dict] = None) -> list[str]:
         data = ifaces if ifaces is not None else self.show_interfaces()
         names = []

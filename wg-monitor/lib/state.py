@@ -25,6 +25,7 @@ DEFAULT_STATE = {
     "last_failover": None,
     "last_provision": None,
     "failover_in_progress": False,
+    "wg_activity": {},
 }
 
 

@@ -84,6 +84,32 @@ def summarize_wireguard(ifaces: dict, handshake_max_age_sec: int) -> list[dict]:
     return rows
 
 
+def inactivity_seconds(wg: dict, activity: Optional[dict], now: float) -> float:
+    """How long the tunnel has been inactive, in seconds."""
+    if wg.get("online"):
+        return 0.0
+    hs = wg.get("last_handshake")
+    try:
+        hs_i = int(hs) if hs is not None else None
+    except (TypeError, ValueError):
+        hs_i = None
+    if hs_i is not None and 0 < hs_i < NEVER_HANDSHAKE:
+        return float(hs_i)
+    entry = activity or {}
+    if hs_i is not None and hs_i >= NEVER_HANDSHAKE:
+        first = entry.get("first_seen_at")
+        if first is None:
+            return 0.0
+        return max(0.0, now - float(first))
+    last_on = entry.get("last_online_at")
+    if last_on is not None:
+        return max(0.0, now - float(last_on))
+    first = entry.get("first_seen_at")
+    if first is not None:
+        return max(0.0, now - float(first))
+    return 0.0
+
+
 def majority_routed_interface(routes: list) -> Optional[str]:
     counts: collections.Counter = collections.Counter()
     for route in routes:
@@ -200,8 +226,16 @@ class Monitor:
     def hidethis_settings(self) -> dict:
         data = public_hidethis_settings(self.config)
         data["auto_provision_enabled"] = self.auto_provision_enabled
+        data["delete_inactive_enabled"] = bool(self.config.get("delete_inactive_enabled", False))
+        try:
+            data["delete_inactive_after_days"] = max(
+                1, int(self.config.get("delete_inactive_after_days", 7) or 7)
+            )
+        except (TypeError, ValueError):
+            data["delete_inactive_after_days"] = 7
         state = self.store.load()
         data["last_provision"] = state.get("last_provision")
+        data["last_cleanup"] = state.get("last_cleanup")
         return data
 
     def update_hidethis_settings(self, body: dict) -> dict:
@@ -234,6 +268,14 @@ class Monitor:
             except (TypeError, ValueError) as exc:
                 raise KeeneticRciError("auto_provision_cooldown_sec must be an integer") from exc
             updates["auto_provision_cooldown_sec"] = max(60, min(86400, cool))
+        if "delete_inactive_enabled" in body and body.get("delete_inactive_enabled") is not None:
+            updates["delete_inactive_enabled"] = bool(body.get("delete_inactive_enabled"))
+        if "delete_inactive_after_days" in body and body.get("delete_inactive_after_days") is not None:
+            try:
+                days = int(body.get("delete_inactive_after_days"))
+            except (TypeError, ValueError) as exc:
+                raise KeeneticRciError("delete_inactive_after_days must be an integer") from exc
+            updates["delete_inactive_after_days"] = max(1, min(365, days))
         if not updates:
             return self.hidethis_settings()
         self.config.update(updates)
@@ -250,6 +292,91 @@ class Monitor:
             + (f" (country={updates.get('hidethis_country')})" if "hidethis_country" in updates else ""),
         )
         return self.hidethis_settings()
+
+    def _track_wg_activity(self, wireguards: list[dict]) -> dict:
+        now = time.time()
+        state = self.store.load()
+        activity = dict(state.get("wg_activity") or {})
+        seen = {w["id"] for w in wireguards if w.get("id")}
+        for w in wireguards:
+            name = w.get("id")
+            if not name:
+                continue
+            entry = dict(activity.get(name) or {})
+            if entry.get("first_seen_at") is None:
+                entry["first_seen_at"] = now
+            if w.get("online"):
+                entry["last_online_at"] = now
+            activity[name] = entry
+        # Drop tracking for interfaces that no longer exist
+        for name in list(activity.keys()):
+            if name not in seen:
+                activity.pop(name, None)
+        self.store.update(wg_activity=activity)
+        return activity
+
+    def cleanup_inactive_wireguards(
+        self,
+        wireguards: list[dict],
+        routed_interface: Optional[str],
+    ) -> dict[str, Any]:
+        activity = self._track_wg_activity(wireguards)
+        enabled = bool(self.config.get("delete_inactive_enabled", False))
+        if not enabled:
+            return {"deleted": [], "skipped": True}
+        try:
+            days = max(1, int(self.config.get("delete_inactive_after_days", 7) or 7))
+        except (TypeError, ValueError):
+            days = 7
+        threshold = days * 86400
+        now = time.time()
+        deleted: list[dict] = []
+        for w in wireguards:
+            name = w.get("id")
+            if not name or w.get("online"):
+                continue
+            if routed_interface and name == routed_interface:
+                continue
+            inactive_for = inactivity_seconds(w, activity.get(name), now)
+            if inactive_for < threshold:
+                continue
+            try:
+                self.rci.delete_interface(name, save=False)
+                deleted.append(
+                    {
+                        "interface": name,
+                        "description": w.get("description") or "",
+                        "inactive_days": round(inactive_for / 86400, 2),
+                    }
+                )
+                log.info(
+                    "Deleted inactive %s after %.1f days",
+                    name,
+                    inactive_for / 86400,
+                )
+            except KeeneticRciError as exc:
+                log.warning("Failed to delete %s: %s", name, exc)
+                self.store.add_event("error", f"Failed to delete inactive {name}: {exc}")
+        if deleted:
+            try:
+                self.rci.save_configuration()
+            except KeeneticRciError as exc:
+                self.store.add_event("error", f"Save after inactive cleanup failed: {exc}")
+            result = {"deleted": deleted, "days": days, "ts": now}
+            self.store.update(last_cleanup=result)
+            self.store.add_event(
+                "cleanup",
+                f"Deleted {len(deleted)} inactive WG (>{days}d): "
+                + ", ".join(d["interface"] for d in deleted),
+                deleted=deleted,
+            )
+            # prune activity for deleted
+            activity = dict(self.store.load().get("wg_activity") or {})
+            for d in deleted:
+                activity.pop(d["interface"], None)
+            self.store.update(wg_activity=activity)
+            return result
+        return {"deleted": [], "days": days, "ts": now}
 
     def update_settings_public(self) -> dict:
         data = public_update_settings(self.config)
@@ -471,6 +598,17 @@ class Monitor:
         target = force_failover_to
         should_failover = False
         any_online = any(w.get("online") for w in snap["wireguards"])
+
+        # Track activity and optionally prune long-inactive tunnels
+        try:
+            cleanup = self.cleanup_inactive_wireguards(snap["wireguards"], routed)
+            if cleanup.get("deleted"):
+                snap = self.collect_snapshot()
+                routed = snap["routed_interface"]
+                any_online = any(w.get("online") for w in snap["wireguards"])
+        except Exception as exc:
+            log.exception("Inactive WG cleanup failed: %s", exc)
+            self.store.add_event("error", f"Inactive cleanup failed: {exc}")
 
         if force_failover_to:
             should_failover = True

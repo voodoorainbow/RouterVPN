@@ -16,6 +16,8 @@ HIDETHIS_KEYS = (
     "hidethis_timeout_sec",
     "auto_provision_enabled",
     "auto_provision_cooldown_sec",
+    "delete_inactive_enabled",
+    "delete_inactive_after_days",
 )
 
 UPDATE_KEYS = (
@@ -42,6 +44,8 @@ def public_hidethis_settings(config: dict) -> dict[str, Any]:
         "hidethis_awg": int(config.get("hidethis_awg", 4) or 4),
         "auto_provision_enabled": bool(config.get("auto_provision_enabled", False)),
         "auto_provision_cooldown_sec": int(config.get("auto_provision_cooldown_sec", 3600) or 3600),
+        "delete_inactive_enabled": bool(config.get("delete_inactive_enabled", False)),
+        "delete_inactive_after_days": int(config.get("delete_inactive_after_days", 7) or 7),
     }
 
 

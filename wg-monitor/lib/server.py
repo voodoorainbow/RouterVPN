@@ -223,6 +223,13 @@ HTML_PAGE = """<!DOCTYPE html>
         <button id="btnHtInstall">Загрузить и установить все по стране</button>
         <button id="btnHtAuto" class="toggle">Авто при отсутствии VPN: …</button>
       </div>
+      <div class="settings" style="border-top:none;padding-top:0">
+        <button id="btnHtCleanup" class="toggle">Удалять неактивные VPN: …</button>
+        <label for="htCleanupDays">через</label>
+        <input id="htCleanupDays" type="number" min="1" max="365" step="1" title="Дней без активности">
+        <span class="sub" style="margin:0">дн.</span>
+        <button id="btnHtCleanupSave">Сохранить срок</button>
+      </div>
       <div class="hint" id="htStatus"></div>
     </section>
     <section class="card">
@@ -327,12 +334,25 @@ HTML_PAGE = """<!DOCTYPE html>
       const on = !!htSettings.auto_provision_enabled;
       autoBtn.textContent = "Авто при отсутствии VPN: " + (on ? "ON" : "OFF");
       autoBtn.classList.toggle("active", on);
+      const cleanBtn = document.getElementById("btnHtCleanup");
+      const cleanOn = !!htSettings.delete_inactive_enabled;
+      cleanBtn.textContent = "Удалять неактивные VPN: " + (cleanOn ? "ON" : "OFF");
+      cleanBtn.classList.toggle("active", cleanOn);
+      const daysInput = document.getElementById("htCleanupDays");
+      if (document.activeElement !== daysInput) {
+        daysInput.value = String(htSettings.delete_inactive_after_days || 7);
+      }
       const lp = htSettings.last_provision;
-      document.getElementById("htStatus").textContent = lp
+      let statusText = lp
         ? ("Последняя установка: " + fmtTs(lp.ts) + " · " + (lp.country || "") +
            " · +" + ((lp.created || []).length) + " / skip " + ((lp.skipped || []).length) +
            " / err " + ((lp.errors || []).length))
         : "Ещё не устанавливали конфиги из UI.";
+      const lc = htSettings.last_cleanup;
+      if (lc && (lc.deleted || []).length) {
+        statusText += " · очистка: удалено " + lc.deleted.length + " (" + fmtTs(lc.ts) + ")";
+      }
+      document.getElementById("htStatus").textContent = statusText;
     }
     function render(state) {
       const routed = state.routed_interface || "—";
@@ -498,6 +518,31 @@ HTML_PAGE = """<!DOCTYPE html>
           body: JSON.stringify({ auto_provision_enabled: !cur })
         });
         renderHidethis(settings);
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnHtCleanup").onclick = async () => {
+      try {
+        const cur = !!(htSettings && htSettings.delete_inactive_enabled);
+        const settings = await api("/api/hidethis/settings", {
+          method: "POST",
+          body: JSON.stringify({ delete_inactive_enabled: !cur })
+        });
+        renderHidethis(settings);
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnHtCleanupSave").onclick = async () => {
+      const days = Number(document.getElementById("htCleanupDays").value);
+      if (!Number.isFinite(days) || days < 1) {
+        alert("Укажите срок в днях (минимум 1)");
+        return;
+      }
+      try {
+        const settings = await api("/api/hidethis/settings", {
+          method: "POST",
+          body: JSON.stringify({ delete_inactive_after_days: Math.round(days) })
+        });
+        renderHidethis(settings);
+        alert("Срок очистки сохранён");
       } catch (e) { alert(e.message); }
     };
     document.getElementById("btnUpdSave").onclick = async () => {

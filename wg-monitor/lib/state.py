@@ -14,6 +14,7 @@ DEFAULT_STATE = {
     "next_check_at": None,
     "routed_interface": None,
     "failover_enabled": True,
+    "auto_provision_enabled": None,
     "check_interval_sec": None,
     "status": "starting",
     "message": "",
@@ -22,6 +23,7 @@ DEFAULT_STATE = {
     "name_servers": [],
     "events": [],
     "last_failover": None,
+    "last_provision": None,
     "failover_in_progress": False,
 }
 

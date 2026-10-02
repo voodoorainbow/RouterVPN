@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.cookiejar
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Optional
@@ -120,3 +122,93 @@ class KeeneticRci:
 
     def save_configuration(self) -> Any:
         return self.batch([{"system": {"configuration": {"save": {}}}}])
+
+    def wireguard_names(self, ifaces: Optional[dict] = None) -> list[str]:
+        data = ifaces if ifaces is not None else self.show_interfaces()
+        names = []
+        for name, iface in (data or {}).items():
+            if isinstance(iface, dict) and iface.get("type") == "Wireguard":
+                names.append(name)
+        return sorted(names)
+
+    def wireguard_endpoints(self, ifaces: Optional[dict] = None) -> dict[str, str]:
+        """Map remote endpoint IP -> interface name."""
+        data = ifaces if ifaces is not None else self.show_interfaces()
+        mapping: dict[str, str] = {}
+        for name, iface in (data or {}).items():
+            if not isinstance(iface, dict) or iface.get("type") != "Wireguard":
+                continue
+            peers = (iface.get("wireguard") or {}).get("peer") or []
+            if isinstance(peers, dict):
+                peers = [peers]
+            for peer in peers:
+                if not isinstance(peer, dict):
+                    continue
+                ep = peer.get("remote-endpoint-address")
+                if ep:
+                    mapping[str(ep)] = name
+        return mapping
+
+    def find_free_wireguard_name(self, ifaces: Optional[dict] = None, max_index: int = 99) -> str:
+        used = set()
+        for name in self.wireguard_names(ifaces):
+            m = re.match(r"(?i)^wireguard(\d+)$", name)
+            if m:
+                used.add(int(m.group(1)))
+        for i in range(0, max_index + 1):
+            if i not in used:
+                return f"Wireguard{i}"
+        raise KeeneticRciError(f"No free Wireguard index in 0..{max_index}")
+
+    def import_wireguard_conf(self, conf_text: str, filename: str = "hidethis.conf") -> dict:
+        """Import .conf via native Keenetic wireguard import (supports AWG fields)."""
+        encoded = base64.b64encode(conf_text.encode("utf-8")).decode("ascii")
+        resp = self.post(
+            "/rci/",
+            {
+                "interface": {
+                    "wireguard": {
+                        "import": encoded,
+                        "name": "",
+                        "filename": filename,
+                    }
+                }
+            },
+        )
+        imp = ((resp or {}).get("interface") or {}).get("wireguard") or {}
+        result = imp.get("import") if isinstance(imp, dict) else None
+        if not isinstance(result, dict) or not result.get("created"):
+            status = (result or {}).get("status") if isinstance(result, dict) else None
+            messages = []
+            if isinstance(status, list):
+                for item in status:
+                    if isinstance(item, dict) and item.get("message"):
+                        messages.append(str(item["message"]))
+            detail = "; ".join(messages) or json.dumps(resp, ensure_ascii=False)[:400]
+            raise KeeneticRciError(f"WireGuard import failed: {detail}")
+        return result
+
+    def configure_imported_wireguard(
+        self,
+        iface: str,
+        description: str,
+        *,
+        global_internet: bool = True,
+        up: bool = True,
+        save: bool = True,
+    ) -> None:
+        cmds: list[dict] = [
+            {
+                "interface": {
+                    iface: {
+                        "description": description,
+                        "up": up,
+                    }
+                }
+            }
+        ]
+        if global_internet:
+            cmds.append({"interface": {iface: {"ip": {"global": True}}}})
+        self.batch(cmds)
+        if save:
+            self.save_configuration()

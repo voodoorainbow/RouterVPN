@@ -8,7 +8,10 @@ import threading
 import time
 from typing import Any, Optional
 
+from .config_store import public_hidethis_settings, update_config_file
+from .hidethis import HidethisError
 from .keenetic_rci import KeeneticRci, KeeneticRciError
+from .provision import Provisioner, require_country
 from .state import StateStore
 
 log = logging.getLogger("wg-monitor")
@@ -141,14 +144,22 @@ def _route_add_cmd(route: dict, new_iface: str) -> dict:
 
 
 class Monitor:
-    def __init__(self, config: dict, store: StateStore, rci: Optional[KeeneticRci] = None):
+    def __init__(
+        self,
+        config: dict,
+        store: StateStore,
+        rci: Optional[KeeneticRci] = None,
+        config_path: Optional[str] = None,
+    ):
         self.config = config
+        self.config_path = config_path
         self.store = store
         self.rci = rci or KeeneticRci(
             config["rci_url"],
             config["username"],
             config["password"],
         )
+        self.provisioner = Provisioner(self.rci, self.config)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -169,6 +180,106 @@ class Monitor:
 
     def set_failover_enabled(self, enabled: bool) -> dict:
         return self.store.update(failover_enabled=bool(enabled))
+
+    @property
+    def auto_provision_enabled(self) -> bool:
+        state = self.store.load()
+        if "auto_provision_enabled" in state and state["auto_provision_enabled"] is not None:
+            return bool(state["auto_provision_enabled"])
+        return bool(self.config.get("auto_provision_enabled", False))
+
+    def set_auto_provision_enabled(self, enabled: bool) -> dict:
+        enabled = bool(enabled)
+        self.config["auto_provision_enabled"] = enabled
+        if self.config_path:
+            update_config_file(self.config_path, {"auto_provision_enabled": enabled})
+        return self.store.update(auto_provision_enabled=enabled)
+
+    def hidethis_settings(self) -> dict:
+        data = public_hidethis_settings(self.config)
+        data["auto_provision_enabled"] = self.auto_provision_enabled
+        state = self.store.load()
+        data["last_provision"] = state.get("last_provision")
+        return data
+
+    def update_hidethis_settings(self, body: dict) -> dict:
+        updates: dict[str, Any] = {}
+        if "hidethis_access_code" in body:
+            code = body.get("hidethis_access_code")
+            if code is not None:
+                code_s = str(code).strip()
+                if code_s:
+                    updates["hidethis_access_code"] = code_s
+        if "hidethis_country" in body:
+            country = str(body.get("hidethis_country") or "").strip().upper()
+            require_country(country)
+            updates["hidethis_country"] = country
+        if "hidethis_base_url" in body and body.get("hidethis_base_url") is not None:
+            updates["hidethis_base_url"] = str(body.get("hidethis_base_url") or "").rstrip("/")
+        if "hidethis_awg" in body and body.get("hidethis_awg") is not None:
+            try:
+                awg = int(body.get("hidethis_awg"))
+            except (TypeError, ValueError) as exc:
+                raise KeeneticRciError("hidethis_awg must be an integer") from exc
+            if awg not in (0, 1, 4):
+                raise KeeneticRciError("hidethis_awg must be 0, 1 or 4")
+            updates["hidethis_awg"] = awg
+        if "auto_provision_enabled" in body and body.get("auto_provision_enabled") is not None:
+            updates["auto_provision_enabled"] = bool(body.get("auto_provision_enabled"))
+        if "auto_provision_cooldown_sec" in body and body.get("auto_provision_cooldown_sec") is not None:
+            try:
+                cool = int(body.get("auto_provision_cooldown_sec"))
+            except (TypeError, ValueError) as exc:
+                raise KeeneticRciError("auto_provision_cooldown_sec must be an integer") from exc
+            updates["auto_provision_cooldown_sec"] = max(60, min(86400, cool))
+        if not updates:
+            return self.hidethis_settings()
+        self.config.update(updates)
+        if self.config_path:
+            update_config_file(self.config_path, updates)
+        state_updates = {}
+        if "auto_provision_enabled" in updates:
+            state_updates["auto_provision_enabled"] = updates["auto_provision_enabled"]
+        if state_updates:
+            self.store.update(**state_updates)
+        self.store.add_event(
+            "settings",
+            "Updated hidethis settings"
+            + (f" (country={updates.get('hidethis_country')})" if "hidethis_country" in updates else ""),
+        )
+        return self.hidethis_settings()
+
+    def install_hidethis_country(self, country: Optional[str] = None) -> dict:
+        with self._lock:
+            cc = (country or self.config.get("hidethis_country") or "").strip().upper()
+            require_country(cc)
+            self.store.update(status="provisioning", message=f"Installing hidethis configs for {cc}")
+            try:
+                result = self.provisioner.install_country(country=cc, skip_existing=True)
+            except HidethisError as exc:
+                self.store.add_event("error", f"hidethis install failed: {exc}")
+                raise
+            msg = (
+                f"hidethis {cc}: created {len(result['created'])}, "
+                f"skipped {len(result['skipped'])}, errors {len(result['errors'])}"
+            )
+            self.store.add_event(
+                "provision",
+                msg,
+                country=result.get("country"),
+                created=result.get("created"),
+                skipped=result.get("skipped"),
+                errors=result.get("errors"),
+            )
+            snap = self.collect_snapshot()
+            return self.store.update(
+                wireguards=snap["wireguards"],
+                routed_interface=snap["routed_interface"],
+                route_count=snap["route_count"],
+                last_provision=result,
+                status="ok" if not result["errors"] else "provision_partial",
+                message=msg,
+            )
 
     @property
     def check_interval_sec(self) -> int:
@@ -283,6 +394,7 @@ class Monitor:
 
         target = force_failover_to
         should_failover = False
+        any_online = any(w.get("online") for w in snap["wireguards"])
 
         if force_failover_to:
             should_failover = True
@@ -303,6 +415,54 @@ class Monitor:
                 else:
                     should_failover = True
                     message = f"Routed WireGuard inactive; failing over to {target}"
+
+        # Auto-provision when there is no active WireGuard at all
+        if (
+            not force_failover_to
+            and not any_online
+            and self.auto_provision_enabled
+            and (self.config.get("hidethis_access_code") or "").strip()
+            and (self.config.get("hidethis_country") or "").strip()
+        ):
+            cooldown = int(self.config.get("auto_provision_cooldown_sec", 3600) or 3600)
+            last = (self.store.load().get("last_provision") or {}).get("ts") or 0
+            if time.time() - float(last) >= cooldown:
+                try:
+                    self.store.update(status="provisioning", message="No active WG; auto-provisioning")
+                    prov = self.provisioner.install_one_for_country()
+                    self.store.update(last_provision=prov)
+                    self.store.add_event(
+                        "provision",
+                        f"Auto-provision {prov.get('country')}: "
+                        f"created {len(prov.get('created') or [])}, "
+                        f"skipped {len(prov.get('skipped') or [])}",
+                        country=prov.get("country"),
+                    )
+                    snap = self.collect_snapshot()
+                    routed = snap["routed_interface"]
+                    any_online = any(w.get("online") for w in snap["wireguards"])
+                    if not snap["routed_online"] and self.failover_enabled:
+                        target = pick_failover_target(
+                            snap["wireguards"],
+                            list(self.config.get("preference") or []),
+                            exclude=routed,
+                        )
+                        if target:
+                            should_failover = True
+                            message = f"After provision, failing over to {target}"
+                    if prov.get("created"):
+                        status = "provisioned"
+                        message = (
+                            f"Auto-provisioned {[c['interface'] for c in prov['created']]}"
+                        )
+                    elif not any_online:
+                        status = "no_failover_target"
+                        message = "No active WG; auto-provision found nothing new"
+                except Exception as exc:
+                    log.exception("Auto-provision failed")
+                    status = "provision_error"
+                    message = f"Auto-provision failed: {exc}"
+                    self.store.add_event("error", message)
 
         if should_failover and target:
             if target == routed and not force_failover_to:

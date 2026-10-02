@@ -9,6 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
+from .hidethis import HidethisError
+
 if TYPE_CHECKING:
     from .monitor import Monitor
 
@@ -131,8 +133,7 @@ HTML_PAGE = """<!DOCTYPE html>
       border-top: 1px solid var(--border);
     }
     .settings label { color: var(--muted); font-size: 0.9rem; }
-    .settings input {
-      width: 88px;
+    .settings input, .settings select {
       appearance: none;
       border: 1px solid var(--border);
       background: #152033;
@@ -141,12 +142,23 @@ HTML_PAGE = """<!DOCTYPE html>
       padding: 8px 10px;
       font: inherit;
     }
+    .settings input[type="number"] { width: 88px; }
+    .settings input[type="text"], .settings input[type="password"] { min-width: 160px; }
+    .grid-form {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label { color: var(--muted); font-size: 0.85rem; }
+    .hint { color: var(--muted); font-size: 0.85rem; margin-top: 10px; }
   </style>
 </head>
 <body>
   <header>
     <h1>WireGuard Monitor</h1>
-    <div class="sub">Keenetic Entware · автопроверка и failover маршрутов</div>
+    <div class="sub">Keenetic Entware · автопроверка, failover и hidethis provisioning</div>
   </header>
   <main>
     <section class="row" id="summary"></section>
@@ -181,11 +193,44 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </section>
     <section class="card">
+      <div class="label">hidethis / VPN-конфиги</div>
+      <div class="hint">Страна обязательна. Кнопка ставит на роутер все серверы только выбранной страны (уже существующие по endpoint пропускаются).</div>
+      <div class="grid-form">
+        <div class="field">
+          <label for="htCode">Код доступа</label>
+          <input id="htCode" type="password" autocomplete="off" placeholder="код из письма">
+          <span class="sub" id="htCodeHint" style="margin:0"></span>
+        </div>
+        <div class="field">
+          <label for="htCountry">Страна *</label>
+          <select id="htCountry">
+            <option value="">— выберите —</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="htAwg">Режим WG</label>
+          <select id="htAwg">
+            <option value="4">AmneziaWG 2.0 (awg=4)</option>
+            <option value="1">AmneziaWG 1.0 (awg=1)</option>
+            <option value="0">Vanilla WireGuard (awg=0)</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button id="btnHtSave">Сохранить настройки</button>
+        <button id="btnHtCountries">Обновить список стран</button>
+        <button id="btnHtInstall">Загрузить и установить все по стране</button>
+        <button id="btnHtAuto" class="toggle">Автопри отсутствии VPN: …</button>
+      </div>
+      <div class="hint" id="htStatus"></div>
+    </section>
+    <section class="card">
       <div class="label">События</div>
       <ul class="events" id="events"></ul>
     </section>
   </main>
   <script>
+    let htSettings = null;
     function fmtTs(ts) {
       if (!ts) return "—";
       return new Date(ts * 1000).toLocaleString();
@@ -200,6 +245,51 @@ HTML_PAGE = """<!DOCTYPE html>
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
+    }
+    function setCountryOptions(countries, selected) {
+      const sel = document.getElementById("htCountry");
+      const current = selected || sel.value || "";
+      const opts = ['<option value="">— выберите —</option>'];
+      (countries || []).forEach(c => {
+        const code = c.code || c;
+        const count = c.count != null ? (" · " + c.count) : "";
+        const sample = c.sample ? (" — " + c.sample) : "";
+        opts.push('<option value="' + code + '">' + code + count + sample + '</option>');
+      });
+      if (current && !(countries || []).some(c => (c.code || c) === current)) {
+        opts.push('<option value="' + current + '">' + current + '</option>');
+      }
+      sel.innerHTML = opts.join("");
+      sel.value = current || "";
+    }
+    function renderHidethis(settings) {
+      htSettings = settings || {};
+      const codeHint = document.getElementById("htCodeHint");
+      codeHint.textContent = htSettings.hidethis_access_code_set
+        ? ("сохранён: " + (htSettings.hidethis_access_code_masked || "****"))
+        : "не задан";
+      const codeInput = document.getElementById("htCode");
+      if (document.activeElement !== codeInput && !codeInput.value) {
+        codeInput.placeholder = htSettings.hidethis_access_code_set ? "оставьте пустым, чтобы не менять" : "код из письма";
+      }
+      document.getElementById("htAwg").value = String(htSettings.hidethis_awg || 4);
+      if (htSettings.hidethis_country) {
+        const sel = document.getElementById("htCountry");
+        if (![...sel.options].some(o => o.value === htSettings.hidethis_country)) {
+          sel.insertAdjacentHTML("beforeend", '<option value="' + htSettings.hidethis_country + '">' + htSettings.hidethis_country + '</option>');
+        }
+        if (document.activeElement !== sel) sel.value = htSettings.hidethis_country;
+      }
+      const autoBtn = document.getElementById("btnHtAuto");
+      const on = !!htSettings.auto_provision_enabled;
+      autoBtn.textContent = "Автопри отсутствии VPN: " + (on ? "ON" : "OFF");
+      autoBtn.classList.toggle("active", on);
+      const lp = htSettings.last_provision;
+      document.getElementById("htStatus").textContent = lp
+        ? ("Последняя установка: " + fmtTs(lp.ts) + " · " + (lp.country || "") +
+           " · +" + ((lp.created || []).length) + " / skip " + ((lp.skipped || []).length) +
+           " / err " + ((lp.errors || []).length))
+        : "Ещё не устанавливали конфиги из UI.";
     }
     function render(state) {
       const routed = state.routed_interface || "—";
@@ -253,9 +343,15 @@ HTML_PAGE = """<!DOCTYPE html>
         ? list.map(e => `<li><span class="mono">${fmtTs(e.ts)}</span> · <strong>${e.type}</strong> — ${e.message}</li>`).join("")
         : "<li>Пока нет событий</li>";
     }
+    async function refreshHidethis() {
+      const settings = await api("/api/hidethis/settings");
+      renderHidethis(settings);
+      return settings;
+    }
     async function refresh() {
       const state = await api("/api/state");
       render(state);
+      await refreshHidethis().catch(() => {});
     }
     document.getElementById("btnRefresh").onclick = () => refresh().catch(e => alert(e.message));
     document.getElementById("btnCheck").onclick = async () => {
@@ -283,6 +379,76 @@ HTML_PAGE = """<!DOCTYPE html>
           body: JSON.stringify({ minutes: Math.round(minutes) })
         });
         await refresh();
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnHtSave").onclick = async () => {
+      const country = document.getElementById("htCountry").value.trim().toUpperCase();
+      if (!country) {
+        alert("Страна обязательна");
+        return;
+      }
+      const body = {
+        hidethis_country: country,
+        hidethis_awg: Number(document.getElementById("htAwg").value),
+        auto_provision_enabled: !!(htSettings && htSettings.auto_provision_enabled)
+      };
+      const code = document.getElementById("htCode").value.trim();
+      if (code) body.hidethis_access_code = code;
+      try {
+        const settings = await api("/api/hidethis/settings", { method: "POST", body: JSON.stringify(body) });
+        document.getElementById("htCode").value = "";
+        renderHidethis(settings);
+        alert("Настройки сохранены");
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnHtCountries").onclick = async () => {
+      try {
+        const code = document.getElementById("htCode").value.trim();
+        const q = code ? ("?code=" + encodeURIComponent(code)) : "";
+        const data = await api("/api/hidethis/countries" + q);
+        setCountryOptions(data.countries || [], (htSettings && htSettings.hidethis_country) || "");
+        document.getElementById("htStatus").textContent = "Стран с WG: " + (data.countries || []).length;
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnHtInstall").onclick = async () => {
+      const country = document.getElementById("htCountry").value.trim().toUpperCase();
+      if (!country) {
+        alert("Сначала выберите страну");
+        return;
+      }
+      if (!confirm("Скачать и установить все WG-конфиги для страны " + country + "?")) return;
+      const btn = document.getElementById("btnHtInstall");
+      btn.disabled = true;
+      document.getElementById("htStatus").textContent = "Установка " + country + "…";
+      try {
+        // save country/awg first if needed
+        const saveBody = {
+          hidethis_country: country,
+          hidethis_awg: Number(document.getElementById("htAwg").value)
+        };
+        const code = document.getElementById("htCode").value.trim();
+        if (code) saveBody.hidethis_access_code = code;
+        await api("/api/hidethis/settings", { method: "POST", body: JSON.stringify(saveBody) });
+        const state = await api("/api/hidethis/install", {
+          method: "POST",
+          body: JSON.stringify({ country })
+        });
+        document.getElementById("htCode").value = "";
+        render(state);
+        await refreshHidethis();
+        const lp = state.last_provision || {};
+        alert("Готово: +" + ((lp.created || []).length) + ", skip " + ((lp.skipped || []).length) + ", err " + ((lp.errors || []).length));
+      } catch (e) { alert(e.message); }
+      finally { btn.disabled = false; }
+    };
+    document.getElementById("btnHtAuto").onclick = async () => {
+      try {
+        const cur = !!(htSettings && htSettings.auto_provision_enabled);
+        const settings = await api("/api/hidethis/settings", {
+          method: "POST",
+          body: JSON.stringify({ auto_provision_enabled: !cur })
+        });
+        renderHidethis(settings);
       } catch (e) { alert(e.message); }
     };
     refresh().catch(e => alert(e.message));
@@ -330,6 +496,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        query = urlparse(self.path).query
         if path in ("/", "/index.html"):
             self._html(HTML_PAGE)
             return
@@ -337,7 +504,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             state = self.monitor.store.load()
             state["check_interval_sec"] = self.monitor.check_interval_sec
             state["failover_enabled"] = self.monitor.failover_enabled
+            state["auto_provision_enabled"] = self.monitor.auto_provision_enabled
             self._json(200, state)
+            return
+        if path == "/api/hidethis/settings":
+            self._json(200, self.monitor.hidethis_settings())
+            return
+        if path == "/api/hidethis/countries":
+            try:
+                from urllib.parse import parse_qs
+
+                params = parse_qs(query)
+                code = (params.get("code") or [None])[0]
+                countries = self.monitor.provisioner.list_countries(access_code=code)
+                self._json(200, {"countries": countries})
+            except HidethisError as exc:
+                self._json(400, {"error": str(exc)})
+            return
+        if path == "/api/hidethis/servers":
+            try:
+                from urllib.parse import parse_qs
+
+                params = parse_qs(query)
+                country = (params.get("country") or [None])[0]
+                code = (params.get("code") or [None])[0]
+                servers = self.monitor.provisioner.list_servers(country=country, access_code=code)
+                self._json(200, {"servers": servers})
+            except HidethisError as exc:
+                self._json(400, {"error": str(exc)})
             return
         self._json(404, {"error": "not found"})
 
@@ -385,6 +579,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "target required"})
                     return
                 state = self.monitor.manual_switch(str(target))
+                self._json(200, state)
+                return
+            if path == "/api/hidethis/settings":
+                body = self._read_json()
+                try:
+                    settings = self.monitor.update_hidethis_settings(body)
+                except (HidethisError, ValueError) as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, settings)
+                return
+            if path == "/api/hidethis/install":
+                body = self._read_json()
+                country = body.get("country")
+                try:
+                    state = self.monitor.install_hidethis_country(country=country)
+                except HidethisError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
                 self._json(200, state)
                 return
             self._json(404, {"error": "not found"})

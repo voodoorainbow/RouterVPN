@@ -28,7 +28,7 @@ DEFAULT_CONFIG_PATHS = [
 ]
 
 
-def load_config(path: str | None) -> dict:
+def load_config(path: str | None) -> tuple[dict, str]:
     candidates = [path] if path else DEFAULT_CONFIG_PATHS
     for candidate in candidates:
         if not candidate:
@@ -38,7 +38,7 @@ def load_config(path: str | None) -> dict:
                 cfg = json.load(fh)
             if not isinstance(cfg, dict):
                 raise SystemExit(f"Invalid config: {candidate}")
-            return cfg
+            return cfg, candidate
     raise SystemExit(
         "Config not found. Copy config.example.json to /opt/etc/wg-monitor/config.json"
     )
@@ -70,14 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
-    config = load_config(args.config)
+    config, config_path = load_config(args.config)
     store = StateStore(config.get("state_path", "/opt/var/lib/wg-monitor/state.json"))
     state = store.load()
     if state.get("updated_at") is None:
         store.update(failover_enabled=bool(config.get("failover_enabled", True)))
 
     rci = KeeneticRci(config["rci_url"], config["username"], config["password"])
-    monitor = Monitor(config, store, rci=rci)
+    monitor = Monitor(config, store, rci=rci, config_path=config_path)
 
     if args.once:
         result = monitor.run_once()

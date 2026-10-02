@@ -10,6 +10,8 @@
 - Автоfailover (можно выключить в UI)
 - Ручное переключение на активный туннель
 - Backup маршрутов перед сменой
+- Загрузка конфигов **hidemy.name / hidethis.app** по выбранной стране (страна обязательна) и установка на Keenetic через RCI import (включая AmneziaWG 2.0)
+- Опциональный автопровisioning, если нет ни одного активного WG
 
 ## Требования
 
@@ -69,9 +71,17 @@ chmod +x scripts/deploy.sh install.sh
   "route_batch_size": 50,
   "policy_name": "Policy0",
   "state_path": "/opt/var/lib/wg-monitor/state.json",
-  "backup_dir": "/opt/var/lib/wg-monitor"
+  "backup_dir": "/opt/var/lib/wg-monitor",
+  "hidethis_base_url": "https://hidethis.app",
+  "hidethis_access_code": "YOUR_ACCESS_CODE",
+  "hidethis_country": "NL",
+  "hidethis_awg": 4,
+  "auto_provision_enabled": false,
+  "auto_provision_cooldown_sec": 3600
 }
 ```
+
+Поля `hidethis_*` и автопровisioning также задаются в веб-UI. **Страна обязательна** для любой загрузки: кнопка ставит на роутер все серверы только выбранной страны (уже существующие по endpoint пропускаются). `hidethis_awg`: `4` = AmneziaWG 2.0 (рекомендуется для KeeneticOS 5.x), `1` = AWG 1.0, `0` = обычный WireGuard.
 
 Образец: `config.example.json`.
 

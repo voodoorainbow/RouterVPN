@@ -15,5 +15,12 @@
   "route_batch_size": 50,
   "policy_name": "Policy0",
   "state_path": "/opt/var/lib/wg-monitor/state.json",
-  "backup_dir": "/opt/var/lib/wg-monitor"
+  "backup_dir": "/opt/var/lib/wg-monitor",
+  "hidethis_base_url": "https://hidethis.app",
+  "hidethis_access_code": "",
+  "hidethis_country": "",
+  "hidethis_awg": 4,
+  "hidethis_timeout_sec": 45,
+  "auto_provision_enabled": false,
+  "auto_provision_cooldown_sec": 3600
 }

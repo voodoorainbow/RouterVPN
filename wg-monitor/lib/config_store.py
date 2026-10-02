@@ -18,6 +18,11 @@ HIDETHIS_KEYS = (
     "auto_provision_cooldown_sec",
 )
 
+UPDATE_KEYS = (
+    "update_repo",
+    "update_ref",
+)
+
 
 def mask_access_code(code: str | None) -> str:
     value = (code or "").strip()
@@ -37,6 +42,13 @@ def public_hidethis_settings(config: dict) -> dict[str, Any]:
         "hidethis_awg": int(config.get("hidethis_awg", 4) or 4),
         "auto_provision_enabled": bool(config.get("auto_provision_enabled", False)),
         "auto_provision_cooldown_sec": int(config.get("auto_provision_cooldown_sec", 3600) or 3600),
+    }
+
+
+def public_update_settings(config: dict) -> dict[str, Any]:
+    return {
+        "update_repo": (config.get("update_repo") or "voodoorainbow/RouterVPN").strip(),
+        "update_ref": (config.get("update_ref") or "wg-monitor").strip(),
     }
 
 

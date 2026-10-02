@@ -8,10 +8,11 @@ import threading
 import time
 from typing import Any, Optional
 
-from .config_store import public_hidethis_settings, update_config_file
+from .config_store import public_hidethis_settings, public_update_settings, update_config_file
 from .hidethis import HidethisError
 from .keenetic_rci import KeeneticRci, KeeneticRciError
 from .provision import Provisioner, require_country
+from .self_update import SelfUpdateError, SelfUpdater
 from .state import StateStore
 
 log = logging.getLogger("wg-monitor")
@@ -160,6 +161,7 @@ class Monitor:
             config["password"],
         )
         self.provisioner = Provisioner(self.rci, self.config)
+        self.updater = SelfUpdater(self.config)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -248,6 +250,80 @@ class Monitor:
             + (f" (country={updates.get('hidethis_country')})" if "hidethis_country" in updates else ""),
         )
         return self.hidethis_settings()
+
+    def update_settings_public(self) -> dict:
+        data = public_update_settings(self.config)
+        try:
+            status = self.updater.status(check_remote=False)
+            data.update(
+                {
+                    "local": status.get("local"),
+                    "remote": status.get("remote"),
+                    "update_available": status.get("update_available"),
+                }
+            )
+        except Exception as exc:
+            data["error"] = str(exc)
+        return data
+
+    def update_update_settings(self, body: dict) -> dict:
+        updates: dict[str, Any] = {}
+        if "update_repo" in body and body.get("update_repo") is not None:
+            repo = str(body.get("update_repo") or "").strip()
+            if repo and "/" not in repo:
+                raise KeeneticRciError("update_repo must look like owner/name")
+            if repo:
+                updates["update_repo"] = repo
+        if "update_ref" in body and body.get("update_ref") is not None:
+            ref = str(body.get("update_ref") or "").strip()
+            if ref:
+                updates["update_ref"] = ref
+        if not updates:
+            return self.update_settings_public()
+        self.config.update(updates)
+        if self.config_path:
+            update_config_file(self.config_path, updates)
+        self.store.add_event("settings", "Updated self-update settings")
+        return self.update_settings_public()
+
+    def check_for_updates(self) -> dict:
+        status = self.updater.status(check_remote=True)
+        self.store.add_event(
+            "update",
+            "Checked repository: "
+            + (
+                f"remote {(status.get('remote') or {}).get('short_sha')}"
+                if status.get("remote")
+                else "no remote"
+            )
+            + (
+                " (update available)"
+                if status.get("update_available")
+                else " (up to date)"
+                if status.get("remote")
+                else ""
+            ),
+        )
+        return status
+
+    def apply_self_update(self, force: bool = False) -> dict:
+        with self._lock:
+            try:
+                result = self.updater.apply_update(force=force)
+            except SelfUpdateError as exc:
+                self.store.add_event("error", f"Self-update failed: {exc}")
+                raise
+            if result.get("updated"):
+                remote = result.get("remote") or {}
+                self.store.add_event(
+                    "update",
+                    result.get("message")
+                    or f"Updated to {remote.get('short_sha')}",
+                    sha=remote.get("sha"),
+                )
+            else:
+                self.store.add_event("update", "Already up to date")
+            return result
 
     def install_hidethis_country(self, country: Optional[str] = None) -> dict:
         with self._lock:

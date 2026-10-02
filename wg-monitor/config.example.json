@@ -22,5 +22,7 @@
   "hidethis_awg": 4,
   "hidethis_timeout_sec": 45,
   "auto_provision_enabled": false,
-  "auto_provision_cooldown_sec": 3600
+  "auto_provision_cooldown_sec": 3600,
+  "update_repo": "voodoorainbow/RouterVPN",
+  "update_ref": "wg-monitor"
 }

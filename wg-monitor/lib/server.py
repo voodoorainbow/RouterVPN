@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 from .hidethis import HidethisError
+from .self_update import SelfUpdateError
 
 if TYPE_CHECKING:
     from .monitor import Monitor
@@ -225,12 +226,54 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="hint" id="htStatus"></div>
     </section>
     <section class="card">
+      <div class="label">Обновление приложения</div>
+      <div class="hint">Только вручную по кнопке. Берёт код из публичного GitHub-репозитория, конфиг роутера не затирается.</div>
+      <div class="grid-form">
+        <div class="field">
+          <label for="updRepo">Репозиторий</label>
+          <input id="updRepo" type="text" value="voodoorainbow/RouterVPN">
+        </div>
+        <div class="field">
+          <label for="updRef">Ветка / тег</label>
+          <input id="updRef" type="text" value="wg-monitor">
+        </div>
+      </div>
+      <div class="actions" style="margin-top:14px">
+        <button id="btnUpdSave">Сохранить</button>
+        <button id="btnUpdCheck">Проверить обновления</button>
+        <button id="btnUpdApply">Обновить из репозитория</button>
+      </div>
+      <div class="hint" id="updStatus"></div>
+    </section>
+    <section class="card">
       <div class="label">События</div>
       <ul class="events" id="events"></ul>
     </section>
   </main>
   <script>
     let htSettings = null;
+    let updInfo = null;
+    function shortSha(sha) {
+      if (!sha) return "—";
+      return String(sha).slice(0, 7);
+    }
+    function renderUpdate(info) {
+      updInfo = info || {};
+      const repoInput = document.getElementById("updRepo");
+      const refInput = document.getElementById("updRef");
+      if (document.activeElement !== repoInput) repoInput.value = updInfo.update_repo || updInfo.repo || "voodoorainbow/RouterVPN";
+      if (document.activeElement !== refInput) refInput.value = updInfo.update_ref || updInfo.ref || "wg-monitor";
+      const local = updInfo.local || {};
+      const remote = updInfo.remote || {};
+      let text = "Локально: " + shortSha(local.sha);
+      if (remote.sha) {
+        text += " · в репозитории: " + shortSha(remote.sha);
+        if (remote.message) text += " — " + remote.message;
+        if (updInfo.update_available) text += " · есть обновление";
+        else text += " · актуально";
+      }
+      document.getElementById("updStatus").textContent = text;
+    }
     function fmtTs(ts) {
       if (!ts) return "—";
       return new Date(ts * 1000).toLocaleString();
@@ -348,10 +391,16 @@ HTML_PAGE = """<!DOCTYPE html>
       renderHidethis(settings);
       return settings;
     }
+    async function refreshUpdate() {
+      const info = await api("/api/update/status");
+      renderUpdate(info);
+      return info;
+    }
     async function refresh() {
       const state = await api("/api/state");
       render(state);
       await refreshHidethis().catch(() => {});
+      await refreshUpdate().catch(() => {});
     }
     document.getElementById("btnRefresh").onclick = () => refresh().catch(e => alert(e.message));
     document.getElementById("btnCheck").onclick = async () => {
@@ -451,6 +500,55 @@ HTML_PAGE = """<!DOCTYPE html>
         renderHidethis(settings);
       } catch (e) { alert(e.message); }
     };
+    document.getElementById("btnUpdSave").onclick = async () => {
+      try {
+        const info = await api("/api/update/settings", {
+          method: "POST",
+          body: JSON.stringify({
+            update_repo: document.getElementById("updRepo").value.trim(),
+            update_ref: document.getElementById("updRef").value.trim()
+          })
+        });
+        renderUpdate(info);
+        alert("Настройки обновления сохранены");
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnUpdCheck").onclick = async () => {
+      try {
+        document.getElementById("updStatus").textContent = "Проверка…";
+        const info = await api("/api/update/check", { method: "POST", body: "{}" });
+        renderUpdate(Object.assign({}, updInfo || {}, info, {
+          update_repo: info.repo,
+          update_ref: info.ref
+        }));
+      } catch (e) { alert(e.message); }
+    };
+    document.getElementById("btnUpdApply").onclick = async () => {
+      if (!confirm("Скачать и установить код из репозитория? Конфиг роутера сохранится. Сервис перезапустится.")) return;
+      const btn = document.getElementById("btnUpdApply");
+      btn.disabled = true;
+      document.getElementById("updStatus").textContent = "Обновление…";
+      try {
+        await api("/api/update/settings", {
+          method: "POST",
+          body: JSON.stringify({
+            update_repo: document.getElementById("updRepo").value.trim(),
+            update_ref: document.getElementById("updRef").value.trim()
+          })
+        });
+        const result = await api("/api/update/apply", {
+          method: "POST",
+          body: JSON.stringify({ force: false })
+        });
+        document.getElementById("updStatus").textContent = result.message || JSON.stringify(result);
+        if (result.restart_scheduled) {
+          setTimeout(() => refresh().catch(() => {}), 4000);
+        } else {
+          await refreshUpdate();
+        }
+      } catch (e) { alert(e.message); }
+      finally { btn.disabled = false; }
+    };
     refresh().catch(e => alert(e.message));
     setInterval(() => refresh().catch(() => {}), 15000);
   </script>
@@ -533,6 +631,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except HidethisError as exc:
                 self._json(400, {"error": str(exc)})
             return
+        if path == "/api/update/status":
+            self._json(200, self.monitor.update_settings_public())
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -599,6 +700,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._json(400, {"error": str(exc)})
                     return
                 self._json(200, state)
+                return
+            if path == "/api/update/settings":
+                body = self._read_json()
+                try:
+                    info = self.monitor.update_update_settings(body)
+                except Exception as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, info)
+                return
+            if path == "/api/update/check":
+                try:
+                    info = self.monitor.check_for_updates()
+                except SelfUpdateError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, info)
+                return
+            if path == "/api/update/apply":
+                body = self._read_json()
+                force = bool(body.get("force"))
+                try:
+                    result = self.monitor.apply_self_update(force=force)
+                except SelfUpdateError as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._json(200, result)
                 return
             self._json(404, {"error": "not found"})
         except Exception as exc:

@@ -41,6 +41,21 @@ cp -f "$SRC_DIR/lib/"*.py "$SHARE/lib/"
 cp -f "$SRC_DIR/config.example.json" "$SHARE/config.example.json"
 chmod 755 "$SHARE/main.py"
 
+# Optional VERSION marker (written by self-update / deploy)
+if [ -f "$SRC_DIR/VERSION" ]; then
+  cp -f "$SRC_DIR/VERSION" "$SHARE/VERSION"
+elif [ -n "${UPDATE_SHA:-}" ]; then
+  "$OPT_ROOT/bin/python3" - <<PY
+import json, time
+open("$SHARE/VERSION","w").write(json.dumps({
+  "sha": "$UPDATE_SHA",
+  "ref": "${UPDATE_REF:-wg-monitor}",
+  "repo": "${UPDATE_REPO:-voodoorainbow/RouterVPN}",
+  "updated_at": time.time(),
+}, indent=2) + "\n")
+PY
+fi
+
 # Config (do not overwrite existing)
 if [ ! -f "$ETC/config.json" ]; then
   if [ -f "$SRC_DIR/config.json" ]; then

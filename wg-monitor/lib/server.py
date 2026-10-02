@@ -220,7 +220,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <button id="btnHtSave">Сохранить настройки</button>
         <button id="btnHtCountries">Обновить список стран</button>
         <button id="btnHtInstall">Загрузить и установить все по стране</button>
-        <button id="btnHtAuto" class="toggle">Автопри отсутствии VPN: …</button>
+        <button id="btnHtAuto" class="toggle">Авто при отсутствии VPN: …</button>
       </div>
       <div class="hint" id="htStatus"></div>
     </section>
@@ -282,7 +282,7 @@ HTML_PAGE = """<!DOCTYPE html>
       }
       const autoBtn = document.getElementById("btnHtAuto");
       const on = !!htSettings.auto_provision_enabled;
-      autoBtn.textContent = "Автопри отсутствии VPN: " + (on ? "ON" : "OFF");
+      autoBtn.textContent = "Авто при отсутствии VPN: " + (on ? "ON" : "OFF");
       autoBtn.classList.toggle("active", on);
       const lp = htSettings.last_provision;
       document.getElementById("htStatus").textContent = lp
